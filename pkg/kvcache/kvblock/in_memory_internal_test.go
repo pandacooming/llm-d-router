@@ -17,6 +17,7 @@ limitations under the License.
 package kvblock
 
 import (
+	"sync"
 	"testing"
 	"time"
 
@@ -67,4 +68,45 @@ func TestInMemoryIndexEvictKeepsEntryAddedConcurrently(t *testing.T) {
 	got, err := idx.Lookup(ctx, []BlockHash{key}, nil)
 	require.NoError(t, err)
 	assert.Equal(t, []PodEntry{podB}, got[key])
+}
+
+// TestInMemoryIndexEngineEvictKeepsMappingAddedConcurrently races one pod's
+// engine-key eviction of a block against another pod's store of the same
+// block. The surviving entry must stay reachable through its engine key, or
+// later removals and child stores for that engine key cannot resolve it.
+func TestInMemoryIndexEngineEvictKeepsMappingAddedConcurrently(t *testing.T) {
+	ctx := t.Context()
+	const (
+		engineKey  BlockHash = 9001
+		requestKey BlockHash = 1
+		trials               = 20000
+	)
+	podA := PodEntry{PodIdentifier: "10.0.0.1:8000", DeviceTier: "gpu"}
+	podB := PodEntry{PodIdentifier: "10.0.0.2:8000", DeviceTier: "gpu"}
+
+	for i := range trials {
+		idx, err := NewInMemoryIndex(nil)
+		require.NoError(t, err)
+		require.NoError(t, idx.Add(ctx, []BlockHash{engineKey}, []BlockHash{requestKey}, []PodEntry{podA}))
+
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			_ = idx.Evict(ctx, EngineKey, []BlockHash{engineKey}, []PodEntry{podA})
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			_ = idx.Add(ctx, []BlockHash{engineKey}, []BlockHash{requestKey}, []PodEntry{podB})
+		}()
+		close(start)
+		wg.Wait()
+
+		got, err := idx.GetRequestKey(ctx, engineKey)
+		require.NoError(t, err, "trial %d: engine key mapping removed while pod B's entry remains", i)
+		require.Equal(t, requestKey, got, "trial %d", i)
+	}
 }

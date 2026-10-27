@@ -349,6 +349,12 @@ func (m *InMemoryIndex) Add(ctx context.Context, engineKeys, requestKeys []Block
 		return err
 	}
 
+	// Hold m.mu across the engine->request mappings and the pod entry inserts,
+	// so Evict cannot find the request keys empty and remove a mapping that
+	// this call has written but whose entries it has not inserted yet.
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	// Build engine->request mappings when engine keys are provided.
 	// The ratio of array lengths determines the mapping type:
 	//   equal  (4 eng, 4 req) -> 1:1   E0->R0, E1->R1, ...
@@ -362,10 +368,6 @@ func (m *InMemoryIndex) Add(ctx context.Context, engineKeys, requestKeys []Block
 	}
 
 	// Store requestKey -> PodCache mappings for all request keys.
-	// Hold m.mu to prevent Evict from checking emptiness and removing the
-	// engine→request mapping while we are inserting pod entries.
-	m.mu.Lock()
-	defer m.mu.Unlock()
 
 	for _, requestKey := range requestKeys {
 		podCache, found := m.data.Get(requestKey)
